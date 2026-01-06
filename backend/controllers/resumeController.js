@@ -1,34 +1,43 @@
 // backend/controllers/resumeController.js
-import dotenv from "dotenv"; // ✅ Must be first
+
+import dotenv from "dotenv";
 dotenv.config();
 
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import path from "path";
 
-// 🔹 Check GEMINI_API_KEY
-if (!process.env.GEMINI_API_KEY) {
-  throw new Error("GEMINI_API_KEY missing in .env");
-}
+// ✅ CONFIRMED WORKING MODEL (v1beta + generateContent)
+const GEMINI_MODEL = "gemini-2.5-flash";
 
-// 🔹 Initialize Gemini with v1 API
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY, {
-  apiVersion: "v1", // 🔥 v1 API
-});
+// ✅ Initialize Gemini safely
+const genAI = process.env.GEMINI_API_KEY
+  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  : null;
 
+// ================================
+// Resume Analysis Controller
+// ================================
 export const analyzeResume = async (req, res) => {
   try {
+    // 1️⃣ Validate upload
     if (!req.file) {
       return res.status(400).json({ error: "No resume uploaded" });
     }
 
-    // 1️⃣ Extract text from PDF (Windows-safe path)
+    if (!genAI) {
+      console.error("❌ GEMINI_API_KEY not configured");
+      return res
+        .status(500)
+        .json({ error: "AI service is not configured on the server." });
+    }
+
+    // 2️⃣ Extract text from PDF (Windows-safe)
     const loadingTask = pdfjsLib.getDocument({
       data: new Uint8Array(req.file.buffer),
-      standardFontDataUrl: `file:///${path.join(
-        process.cwd(),
-        "node_modules/pdfjs-dist/legacy/build/"
-      ).replace(/\\/g, "/")}/`, // ✅ Windows safe + trailing slash
+      standardFontDataUrl: `file:///${path
+        .join(process.cwd(), "node_modules/pdfjs-dist/legacy/build/")
+        .replace(/\\/g, "/")}/`,
     });
 
     const pdf = await loadingTask.promise;
@@ -44,40 +53,77 @@ export const analyzeResume = async (req, res) => {
       return res.status(400).json({ error: "Unable to read resume text" });
     }
 
-    // 2️⃣ Use supported Gemini model
+    // 3️⃣ Gemini model
     const model = genAI.getGenerativeModel({
-      model: "gemini-pro", // ✅ v1 API supported model
+      model: GEMINI_MODEL,
     });
 
-    // 3️⃣ Strict JSON prompt
+    // 4️⃣ Strict JSON prompt (ATS-style)
     const prompt = `
-Return ONLY valid JSON:
+You are an ATS and career expert.
+
+Return ONLY valid JSON in EXACTLY this format:
 {
   "atsScore": number,
-  "missingSkills": [],
-  "recommendedRoles": [],
-  "improvementTips": []
+  "missingSkills": string[],
+  "recommendedRoles": string[],
+  "improvementTips": string[]
 }
+
+Rules:
+- atsScore must be between 0 and 100
+- Do NOT add extra keys
+- Do NOT add explanations
+- JSON only
 
 Resume:
 ${resumeText.slice(0, 3000)}
 `;
 
-    // 4️⃣ Generate AI response
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    // 5️⃣ Gemini call (official v1beta format)
+    const result = await model.generateContent({
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: prompt }],
+        },
+      ],
+    });
 
-    // 5️⃣ Safe JSON parse
-    const jsonStart = text.indexOf("{");
-    const jsonEnd = text.lastIndexOf("}");
-    const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+    const rawText =
+      result?.response?.candidates
+        ?.flatMap((c) =>
+          c?.content?.parts?.map((p) => p.text || "") || []
+        )
+        .join("")
+        .trim() || "";
 
+    // 6️⃣ Extract JSON safely
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error("AI response missing JSON payload");
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    // 7️⃣ Return clean response
     return res.json(parsed);
   } catch (err) {
-    console.error("Resume analysis error:", err.message);
-    return res.status(500).json({ error: err.message });
+    // 🔴 Clean error logging (no server crash)
+    console.error("❌ Resume analysis error:", {
+      message: err?.message,
+      status: err?.status,
+      statusText: err?.statusText,
+    });
+
+    return res.status(500).json({
+      error: "Resume analysis failed. Please try again.",
+    });
   }
 };
 
-// 🔹 Debug: check GEMINI_API_KEY loaded
-console.log("Loaded GEMINI_API_KEY:", process.env.GEMINI_API_KEY ? "YES" : "NO");
+// Debug (safe)
+console.log(
+  "Loaded GEMINI_API_KEY:",
+  process.env.GEMINI_API_KEY ? "YES" : "NO"
+);

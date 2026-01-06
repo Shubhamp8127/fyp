@@ -3,17 +3,48 @@ import { useNavigate } from "react-router-dom";
 import "../styles/careerQuizHub.css";
 import { Play, RefreshCw } from "lucide-react";
 
-const userId = "demoUser"; // replace with logged-in user id
-
 const CareerQuizHub = () => {
   const navigate = useNavigate();
   const [recentActivity, setRecentActivity] = useState([]);
+  const apiBaseUrl = process.env.REACT_APP_API_URL || "http://localhost:5000";
 
   useEffect(() => {
-    fetch(`http://localhost:5000/api/dashboard/${userId}`)
-      .then(res => res.json())
-      .then(data => setRecentActivity(data.recentActivity));
-  }, []);
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setRecentActivity([]);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    const fetchActivity = async () => {
+      try {
+        const res = await fetch(`${apiBaseUrl}/api/dashboard`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          throw new Error(`Request failed with status ${res.status}`);
+        }
+
+        const data = await res.json();
+        setRecentActivity(Array.isArray(data.recentActivity) ? data.recentActivity : []);
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          console.error("Failed to load dashboard activity", error);
+          setRecentActivity([]);
+        }
+      }
+    };
+
+    fetchActivity();
+
+    return () => controller.abort();
+  }, [apiBaseUrl]);
 
   return (
     <div className="cq-page">
